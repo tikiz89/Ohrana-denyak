@@ -1,0 +1,644 @@
+name: Сборка APK "Охрана деняк"
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Генерация всех файлов проекта
+        run: |
+          mkdir -p app/src/main/java/ru/zheka/ohranadenyak
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "OhranaDenyak"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.2.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "ru.zheka.ohranadenyak"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "ru.zheka.ohranadenyak"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+                  vectorDrawables { useSupportLibrary = true }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
+          }
+
+          dependencies {
+              val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
+              implementation(composeBom)
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+              implementation("androidx.activity:activity-compose:1.8.2")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-graphics")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+              <application
+                  android:allowBackup="true"
+                  android:label="Охрана деняк"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  tools:targetApi="34">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:theme="@android:style/Theme.Material.NoActionBar">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".BankNotificationService"
+                      android:exported="true"
+                      android:label="Охрана деняк (Авточтение банков)"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/ru/zheka/ohranadenyak/ExpenseDbHelper.kt
+          package ru.zheka.ohranadenyak
+
+          import android.content.ContentValues
+          import android.content.Context
+          import android.database.sqlite.SQLiteDatabase
+          import android.database.sqlite.SQLiteOpenHelper
+          import java.util.Calendar
+
+          data class ExpenseItem(
+              val id: Long,
+              val amount: Double,
+              val merchant: String,
+              val category: String,
+              val bank: String,
+              val timestamp: Long,
+              val isIncome: Boolean = false
+          )
+
+          enum class ZenCategory(val title: String, val colorHex: Long, val emoji: String) {
+              GROCERIES("Продукты", 0xFF4CAF50, "🛒"),
+              AUTO("Авто и АЗС", 0xFFFF9800, "🚗"),
+              CAFE("Кафе и Доставка", 0xFFE91E63, "🍔"),
+              MARKETPLACES("Маркетплейсы", 0xFF9C27B0, "📦"),
+              HOME("Дом и ЖКХ", 0xFF00BCD4, "🏠"),
+              GAMING("Игры и Подписки", 0xFF3F51B5, "🎮"),
+              HEALTH("Аптека и Здоровье", 0xFFF44336, "💊"),
+              OTHER("Прочее", 0xFF607D8B, "💳");
+
+              companion object {
+                  fun fromTitle(title: String): ZenCategory = values().find { it.title == title } ?: OTHER
+
+                  fun detectCategory(merchant: String, rawText: String): ZenCategory {
+                      val text = "$merchant $rawText".lowercase()
+                      return when {
+                          text.contains("пятерочка") || text.contains("пятёрочка") || text.contains("pyaterochka") ||
+                          text.contains("магнит") || text.contains("magnit") || text.contains("монетка") ||
+                          text.contains("перекресток") || text.contains("лента") || text.contains("кб") ||
+                          text.contains("красное") || text.contains("krasnoe") || text.contains("ашан") ||
+                          text.contains("вкусвилл") || text.contains("супермаркет") || text.contains("продукты") -> GROCERIES
+
+                          text.contains("азс") || text.contains("газпромнефть") || text.contains("лукойл") ||
+                          text.contains("роснефть") || text.contains("azs") || text.contains("авто") ||
+                          text.contains("мойка") || text.contains("шиномонтаж") || text.contains("парковка") ||
+                          text.contains("штраф") || text.contains("запчаст") -> AUTO
+
+                          text.contains("кафе") || text.contains("ресторан") || text.contains("додо") ||
+                          text.contains("dodo") || text.contains("вкусно и точка") || text.contains("burger") ||
+                          text.contains("kfc") || text.contains("rostics") || text.contains("кофе") ||
+                          text.contains("coffee") || text.contains("шаурма") || text.contains("пекарня") ||
+                          text.contains("суши") || text.contains("пицца") -> CAFE
+
+                          text.contains("ozon") || text.contains("озон") || text.contains("wildberries") ||
+                          text.contains("вайлдберриз") || text.contains("wb") || text.contains("ymarket") ||
+                          text.contains("яндекс маркет") || text.contains("aliexpress") || text.contains("dns") ||
+                          text.contains("днс") || text.contains("м.видео") || text.contains("эльдорадо") -> MARKETPLACES
+
+                          text.contains("жкх") || text.contains("ростелеком") || text.contains("интернет") ||
+                          text.contains("мтс") || text.contains("мегафон") || text.contains("билайн") ||
+                          text.contains("tele2") || text.contains("теле2") || text.contains("yota") ||
+                          text.contains("коммунал") || text.contains("энерго") -> HOME
+
+                          text.contains("steam") || text.contains("playstation") || text.contains("яндекс плюс") ||
+                          text.contains("yandex plus") || text.contains("кинопоиск") || text.contains("игры") -> GAMING
+
+                          text.contains("аптека") || text.contains("apteka") || text.contains("клиника") ||
+                          text.contains("здравсити") || text.contains("еаптека") || text.contains("стоматолог") -> HEALTH
+
+                          else -> OTHER
+                      }
+                  }
+              }
+          }
+
+          class ExpenseDbHelper(context: Context) : SQLiteOpenHelper(context, "ohrana_denyak.db", null, 1) {
+              override fun onCreate(db: SQLiteDatabase) {
+                  db.execSQL("CREATE TABLE expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL NOT NULL, merchant TEXT NOT NULL, category TEXT NOT NULL, bank TEXT NOT NULL, timestamp INTEGER NOT NULL, is_income INTEGER DEFAULT 0)")
+                  db.execSQL("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                  val cv = ContentValues().apply { put("key", "monthly_budget"); put("value", "80000") }
+                  db.insert("settings", null, cv)
+              }
+
+              override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                  db.execSQL("DROP TABLE IF EXISTS expenses")
+                  db.execSQL("DROP TABLE IF EXISTS settings")
+                  onCreate(db)
+              }
+
+              fun insertExpense(amount: Double, merchant: String, category: String, bank: String, timestamp: Long = System.currentTimeMillis(), isIncome: Boolean = false): Long {
+                  val db = writableDatabase
+                  val ninetySecAgo = timestamp - 90_000
+                  val cursor = db.rawQuery("SELECT id FROM expenses WHERE ABS(amount - ?) < 0.01 AND timestamp > ? AND is_income = ?", arrayOf(amount.toString(), ninetySecAgo.toString(), if (isIncome) "1" else "0"))
+                  val exists = cursor.moveToFirst()
+                  cursor.close()
+                  if (exists) return -1L
+
+                  val values = ContentValues().apply {
+                      put("amount", amount); put("merchant", merchant); put("category", category)
+                      put("bank", bank); put("timestamp", timestamp); put("is_income", if (isIncome) 1 else 0)
+                  }
+                  return db.insert("expenses", null, values)
+              }
+
+              fun deleteExpense(id: Long) { writableDatabase.delete("expenses", "id = ?", arrayOf(id.toString())) }
+
+              fun getExpensesForMonth(year: Int, monthZeroBased: Int): List<ExpenseItem> {
+                  val cal = Calendar.getInstance()
+                  cal.set(year, monthZeroBased, 1, 0, 0, 0)
+                  cal.set(Calendar.MILLISECOND, 0)
+                  val startMs = cal.timeInMillis
+                  cal.add(Calendar.MONTH, 1)
+                  val endMs = cal.timeInMillis
+
+                  val list = mutableListOf<ExpenseItem>()
+                  val cursor = readableDatabase.rawQuery("SELECT id, amount, merchant, category, bank, timestamp, is_income FROM expenses WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp DESC", arrayOf(startMs.toString(), endMs.toString()))
+                  while (cursor.moveToNext()) {
+                      list.add(ExpenseItem(cursor.getLong(0), cursor.getDouble(1), cursor.getString(2), cursor.getString(3), cursor.getString(4), cursor.getLong(5), cursor.getInt(6) == 1))
+                  }
+                  cursor.close()
+                  return list
+              }
+
+              fun getMonthlyBudget(): Double {
+                  val cursor = readableDatabase.rawQuery("SELECT value FROM settings WHERE key = 'monthly_budget'", null)
+                  var budget = 80000.0
+                  if (cursor.moveToFirst()) budget = cursor.getString(0).toDoubleOrNull() ?: 80000.0
+                  cursor.close()
+                  return budget
+              }
+
+              fun setMonthlyBudget(amount: Double) {
+                  val cv = ContentValues().apply { put("key", "monthly_budget"); put("value", amount.toString()) }
+                  writableDatabase.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/ru/zheka/ohranadenyak/BankNotificationService.kt
+          package ru.zheka.ohranadenyak
+
+          import android.app.Notification
+          import android.content.Intent
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+
+          class BankNotificationService : NotificationListenerService() {
+              companion object {
+                  const val ACTION_EXPENSE_ADDED = "ru.zheka.ohranadenyak.EXPENSE_ADDED"
+                  val SUPPORTED_BANKS = mapOf(
+                      "ru.sberbankmobile" to "Сбербанк",
+                      "com.idamob.tinkoff.android" to "Т-Банк",
+                      "ru.tinkoff.mb" to "Т-Банк",
+                      "ru.vtb24.mobilebanking.android" to "ВТБ",
+                      "ru.gazprombank.android.mobilebank.app" to "Газпромбанк",
+                      "ru.alfabank.mobile.android" to "Альфа-Банк",
+                      "com.openbank" to "Открытие",
+                      "ru.raiffeisennews" to "Райффайзен",
+                      "ru.yoo.money" to "ЮMoney",
+                      "com.Wildberries.ru" to "WB Кошелек",
+                      "ru.ozon.app.android" to "Ozon Банк"
+                  )
+              }
+
+              override fun onNotificationPosted(sbn: StatusBarNotification?) {
+                  if (sbn == null) return
+                  val pkg = sbn.packageName ?: return
+                  val bankName = SUPPORTED_BANKS[pkg] ?: if (pkg == packageName) "Тест-Банк" else return
+                  val extras = sbn.notification?.extras ?: return
+                  val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+                  val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+                  val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: text
+                  val fullContent = "$title $bigText".trim()
+                  if (fullContent.isEmpty()) return
+                  parseAndSave(fullContent, title, bigText, bankName)
+              }
+
+              private fun parseAndSave(fullText: String, title: String, body: String, bankName: String) {
+                  val lower = fullText.lowercase()
+                  val ignoreMarkers = listOf("код подтверждения", "никому не сообщайте", "код:", "пароль", "вход в приложение", "запрос на перевод", "недостаточно средств", "отказ", "отклонено", "перевод между своими")
+                  if (ignoreMarkers.any { lower.contains(it) }) return
+
+                  val expenseMarkers = listOf("покупка", "оплата", "списание", "платеж", "платёж", "перевод", "снятие", "потрачено", "минус", "успешно")
+                  val incomeMarkers = listOf("зачисление", "пополнение", "перевод от", "возврат", "зарплата", "кэшбэк")
+
+                  val isIncome = incomeMarkers.any { lower.contains(it) } && !lower.contains("покупка")
+                  val isExpense = expenseMarkers.any { lower.contains(it) }
+                  if (!isExpense && !isIncome) return
+
+                  val cleanedForAmount = fullText.replace(Regex("(?:баланс|доступно|остаток)[^0-9]*([0-9\\s.,]+)\\s*(?:₽|р|руб|rub)", RegexOption.IGNORE_CASE), "")
+                  val amountRegex = Regex("([0-9][0-9\\s\\u00A0]*(?:[.,][0-9]{1,2})?)\\s*(?:₽|р\\.|руб|rub|р\\b)", RegexOption.IGNORE_CASE)
+                  val match = amountRegex.find(cleanedForAmount) ?: return
+                  val rawAmountStr = match.groupValues[1].replace("\\s".toRegex(), "").replace("\u00A0", "").replace(",", ".")
+                  val amount = rawAmountStr.toDoubleOrNull() ?: return
+                  if (amount <= 0.0) return
+
+                  val merchant = extractMerchant(title, body, bankName)
+                  val category = if (isIncome) "Доход" else ZenCategory.detectCategory(merchant, fullText).title
+                  val db = ExpenseDbHelper(applicationContext)
+                  val insertedId = db.insertExpense(amount, merchant, category, bankName, isIncome = isIncome)
+                  if (insertedId != -1L) sendBroadcast(Intent(ACTION_EXPENSE_ADDED))
+              }
+
+              private fun extractMerchant(title: String, body: String, bankName: String): String {
+                  if (title.isNotBlank() && !title.equals(bankName, ignoreCase = true) && !title.lowercase().contains("сбер") && !title.lowercase().contains("покупка") && !title.lowercase().contains("списание")) {
+                      return title.trim()
+                  }
+                  val merchantRegex = Regex("(?:в магазине|в|кому:)\\s+([А-Яа-яA-Za-z0-9_\\-\\s.\"]{2,25}?)(?:\\.|,|\\s+Баланс|\\s+Доступно|\\s+Карта|$)", RegexOption.IGNORE_CASE)
+                  val mMatch = merchantRegex.find(body)
+                  if (mMatch != null) {
+                      val found = mMatch.groupValues[1].trim()
+                      if (found.length >= 2) return found
+                  }
+                  return body.take(28).trim().ifEmpty { "Операция по карте" }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/ru/zheka/ohranadenyak/MainActivity.kt
+          package ru.zheka.ohranadenyak
+
+          import android.content.*
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.tween
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import java.text.NumberFormat
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          class MainActivity : ComponentActivity() {
+              private lateinit var dbHelper: ExpenseDbHelper
+              private var refreshTrigger by mutableIntStateOf(0)
+              private val expenseReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) { refreshTrigger++ }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  dbHelper = ExpenseDbHelper(this)
+                  val filter = IntentFilter(BankNotificationService.ACTION_EXPENSE_ADDED)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      registerReceiver(expenseReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      registerReceiver(expenseReceiver, filter)
+                  }
+                  setContent {
+                      val darkScheme = darkColorScheme(primary = Color(0xFF00E676), secondary = Color(0xFF29B6F6), background = Color(0xFF0F1115), surface = Color(0xFF1A1D24), onPrimary = Color.Black)
+                      MaterialTheme(colorScheme = darkScheme) {
+                          MainScreen(dbHelper = dbHelper, refreshKey = refreshTrigger, onForceRefresh = { refreshTrigger++ })
+                      }
+                  }
+              }
+              override fun onResume() { super.onResume(); refreshTrigger++ }
+              override fun onDestroy() { super.onDestroy(); unregisterReceiver(expenseReceiver) }
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun MainScreen(dbHelper: ExpenseDbHelper, refreshKey: Int, onForceRefresh: () -> Unit) {
+              val context = LocalContext.current
+              var selectedTab by remember { mutableIntStateOf(0) }
+              val cal = remember { Calendar.getInstance() }
+              var currentYear by remember { mutableIntStateOf(cal.get(Calendar.YEAR)) }
+              var currentMonth by remember { mutableIntStateOf(cal.get(Calendar.MONTH)) }
+
+              val expenses = remember(refreshKey, currentYear, currentMonth) { dbHelper.getExpensesForMonth(currentYear, currentMonth) }
+              val budget = remember(refreshKey) { dbHelper.getMonthlyBudget() }
+              val isListenerEnabled = remember(refreshKey) { isNotificationServiceEnabled(context) }
+
+              var showAddDialog by remember { mutableStateOf(false) }
+              var showBudgetDialog by remember { mutableStateOf(false) }
+
+              Scaffold(
+                  topBar = {
+                      TopAppBar(
+                          title = { Text("🛡️ Охрана деняк", fontWeight = FontWeight.Bold, fontSize = 20.sp) },
+                          actions = { IconButton(onClick = { showBudgetDialog = true }) { Icon(Icons.Default.AccountBalanceWallet, contentDescription = null, tint = Color.White) } },
+                          colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF0F1115), titleContentColor = Color.White)
+                      )
+                  },
+                  bottomBar = {
+                      NavigationBar(containerColor = Color(0xFF161920)) {
+                          NavigationBarItem(selected = selectedTab == 0, onClick = { selectedTab = 0 }, icon = { Icon(Icons.Default.PieChart, null) }, label = { Text("Аналитика") })
+                          NavigationBarItem(selected = selectedTab == 1, onClick = { selectedTab = 1 }, icon = { Icon(Icons.Default.ReceiptLong, null) }, label = { Text("Операции") })
+                          NavigationBarItem(selected = selectedTab == 2, onClick = { selectedTab = 2 }, icon = { Icon(Icons.Default.Security, null) }, label = { Text("Авточтение") })
+                      }
+                  },
+                  floatingActionButton = {
+                      FloatingActionButton(onClick = { showAddDialog = true }, containerColor = Color(0xFF00E676), contentColor = Color.Black) {
+                          Icon(Icons.Default.Add, contentDescription = null)
+                      }
+                  }
+              ) { padding ->
+                  Column(modifier = Modifier.fillMaxSize().background(Color(0xFF0F1115)).padding(padding)) {
+                      if (!isListenerEnabled) {
+                          Card(
+                              modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clickable { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
+                              colors = CardDefaults.cardColors(containerColor = Color(0xFF3E2723)), shape = RoundedCornerShape(14.dp)
+                          ) {
+                              Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                  Icon(Icons.Default.WarningAmber, null, tint = Color(0xFFFFB300))
+                                  Spacer(Modifier.width(12.dp))
+                                  Column {
+                                      Text("Авточтение пушей выключено", fontWeight = FontWeight.Bold, color = Color(0xFFFFE082), fontSize = 14.sp)
+                                      Text("Нажми сюда и включи доступ для «Охрана деняк»", color = Color(0xFFFFCC80), fontSize = 12.sp)
+                                  }
+                              }
+                          }
+                      }
+
+                      val monthNames = listOf("Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь")
+                      Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                          IconButton(onClick = { if (currentMonth == 0) { currentMonth = 11; currentYear-- } else currentMonth-- }) { Icon(Icons.Default.ChevronLeft, null, tint = Color.White) }
+                          Text("${monthNames[currentMonth]} $currentYear", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                          IconButton(onClick = { if (currentMonth == 11) { currentMonth = 0; currentYear++ } else currentMonth++ }) { Icon(Icons.Default.ChevronRight, null, tint = Color.White) }
+                      }
+
+                      when (selectedTab) {
+                          0 -> AnalyticsTab(expenses, budget) { showBudgetDialog = true }
+                          1 -> TransactionsTab(expenses) { id -> dbHelper.deleteExpense(id); onForceRefresh() }
+                          2 -> SimulatorTab(isListenerEnabled, { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) { amt, merch, bank ->
+                              dbHelper.insertExpense(amt, merch, ZenCategory.detectCategory(merch, merch).title, bank)
+                              onForceRefresh()
+                          }
+                      }
+                  }
+              }
+
+              if (showAddDialog) {
+                  var amountText by remember { mutableStateOf("") }
+                  var merchantText by remember { mutableStateOf("") }
+                  AlertDialog(
+                      onDismissRequest = { showAddDialog = false },
+                      containerColor = Color(0xFF1A1D24),
+                      title = { Text("Добавить расход", color = Color.White) },
+                      text = {
+                          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                              OutlinedTextField(value = amountText, onValueChange = { amountText = it }, label = { Text("Сумма ₽") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                              OutlinedTextField(value = merchantText, onValueChange = { merchantText = it }, label = { Text("Магазин (напр. Пятёрочка)") })
+                          }
+                      },
+                      confirmButton = {
+                          Button(onClick = {
+                              val amt = amountText.replace(",", ".").toDoubleOrNull() ?: 0.0
+                              if (amt > 0) {
+                                  val m = merchantText.ifBlank { "Покупка" }
+                                  dbHelper.insertExpense(amt, m, ZenCategory.detectCategory(m, m).title, "Вручную")
+                                  showAddDialog = false; onForceRefresh()
+                              }
+                          }) { Text("Сохранить") }
+                      }
+                  )
+              }
+
+              if (showBudgetDialog) {
+                  var text by remember { mutableStateOf(budget.toInt().toString()) }
+                  AlertDialog(
+                      onDismissRequest = { showBudgetDialog = false },
+                      containerColor = Color(0xFF1A1D24),
+                      title = { Text("Лимит на месяц", color = Color.White) },
+                      text = { OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Сумма ₽") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)) },
+                      confirmButton = {
+                          Button(onClick = {
+                              val v = text.toDoubleOrNull() ?: budget
+                              if (v > 0) { dbHelper.setMonthlyBudget(v); showBudgetDialog = false; onForceRefresh() }
+                          }) { Text("Сохранить") }
+                      }
+                  )
+              }
+          }
+
+          @Composable
+          fun AnalyticsTab(expenses: List<ExpenseItem>, budget: Double, onEditBudget: () -> Unit) {
+              val onlyExp = expenses.filter { !it.isIncome }
+              val totalSpent = onlyExp.sumOf { it.amount }
+              val byCategory = onlyExp.groupBy { it.category }.mapValues { it.value.sumOf { x -> x.amount } }.toList().sortedByDescending { it.second }
+
+              LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                  item {
+                      Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1D24)), shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+                          Column(modifier = Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                              Box(contentAlignment = Alignment.Center, modifier = Modifier.size(200.dp)) {
+                                  val anim by animateFloatAsState(1f, tween(600), label = "")
+                                  Canvas(modifier = Modifier.size(180.dp)) {
+                                      val sw = 24.dp.toPx()
+                                      if (totalSpent <= 0.0) {
+                                          drawArc(Color(0xFF2C313C), 0f, 360f, false, style = Stroke(sw, cap = StrokeCap.Round))
+                                      } else {
+                                          var start = -90f
+                                          byCategory.forEach { (cat, amt) ->
+                                              val sweep = ((amt / totalSpent).toFloat() * 360f) * anim
+                                              drawArc(Color(ZenCategory.fromTitle(cat).colorHex), start, sweep, false, style = Stroke(sw, cap = StrokeCap.Butt))
+                                              start += sweep
+                                          }
+                                      }
+                                  }
+                                  Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                      Text("Расход за месяц", color = Color.Gray, fontSize = 12.sp)
+                                      Text(formatRub(totalSpent), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+                                  }
+                              }
+                              Spacer(Modifier.height(16.dp))
+                              val progress = if (budget > 0) (totalSpent / budget).toFloat().coerceIn(0f, 1f) else 0f
+                              Row(modifier = Modifier.fillMaxWidth().clickable { onEditBudget() }, horizontalArrangement = Arrangement.SpaceBetween) {
+                                  Text("Лимит: ${formatRub(budget)}", color = Color.LightGray, fontSize = 13.sp)
+                                  Text("Остаток: ${formatRub((budget - totalSpent).coerceAtLeast(0.0))}", color = Color(0xFF00E676), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                              }
+                              Spacer(Modifier.height(8.dp))
+                              LinearProgressIndicator(progress = progress, modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)), color = if (progress < 0.85f) Color(0xFF00E676) else Color(0xFFFF5252), trackColor = Color(0xFF2C313C))
+                          }
+                      }
+                  }
+                  items(byCategory) { (catName, amount) ->
+                      val cat = ZenCategory.fromTitle(catName)
+                      val pct = if (totalSpent > 0) ((amount / totalSpent) * 100).toInt() else 0
+                      Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1D24)), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                          Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(Color(cat.colorHex).copy(alpha = 0.2f)), contentAlignment = Alignment.Center) { Text(cat.emoji, fontSize = 20.sp) }
+                              Spacer(Modifier.width(12.dp))
+                              Column(Modifier.weight(1f)) {
+                                  Text(catName, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                  Text("$pct% от всех трат", color = Color.Gray, fontSize = 12.sp)
+                              }
+                              Text(formatRub(amount), color = Color.White, fontWeight = FontWeight.Bold)
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun TransactionsTab(expenses: List<ExpenseItem>, onDelete: (Long) -> Unit) {
+              val sdf = remember { SimpleDateFormat("dd MMM, HH:mm", Locale("ru")) }
+              LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                  items(expenses, key = { it.id }) { item ->
+                      val cat = ZenCategory.fromTitle(item.category)
+                      Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1D24)), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                          Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Text(cat.emoji, fontSize = 22.sp)
+                              Spacer(Modifier.width(12.dp))
+                              Column(Modifier.weight(1f)) {
+                                  Text(item.merchant, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                  Text("${item.category} • ${item.bank} • ${sdf.format(Date(item.timestamp))}", color = Color.Gray, fontSize = 12.sp)
+                              }
+                              Text("-${formatRub(item.amount)}", color = Color.White, fontWeight = FontWeight.Bold)
+                              IconButton(onClick = { onDelete(item.id) }) { Icon(Icons.Default.DeleteOutline, null, tint = Color.Gray) }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun SimulatorTab(enabled: Boolean, onOpenSettings: () -> Unit, onSim: (Double, String, String) -> Unit) {
+              Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                  Button(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E676), contentColor = Color.Black)) {
+                      Text(if (enabled) "Авточтение активно (Настройки)" else "Включить авточтение пушей", fontWeight = FontWeight.Bold)
+                  }
+                  OutlinedButton(onClick = { onSim(1850.0, "Пятёрочка", "Сбербанк") }, modifier = Modifier.fillMaxWidth()) { Text("🛒 Тест: Пятёрочка 1 850 ₽ (Сбер)") }
+                  OutlinedButton(onClick = { onSim(3400.0, "АЗС Газпромнефть", "Газпромбанк") }, modifier = Modifier.fillMaxWidth()) { Text("🚗 Тест: АЗС Газпромнефть 3 400 ₽ (ГПБ)") }
+                  OutlinedButton(onClick = { onSim(2190.0, "Ozon", "Т-Банк") }, modifier = Modifier.fillMaxWidth()) { Text("📦 Тест: Ozon 2 190 ₽ (Т-Банк)") }
+              }
+          }
+
+          fun isNotificationServiceEnabled(context: Context): Boolean {
+              val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners") ?: return false
+              return flat.contains(context.packageName)
+          }
+
+          fun formatRub(amount: Double): String {
+              val nf = NumberFormat.getNumberInstance(Locale("ru", "RU")).apply { maximumFractionDigits = if (amount % 1.0 == 0.0) 0 else 2 }
+              return "${nf.format(amount)} ₽"
+          }
+          EOF
+
+      - name: Установка JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Настройка Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Сборка Debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Выгрузка готового APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ohrana-Denyak-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
